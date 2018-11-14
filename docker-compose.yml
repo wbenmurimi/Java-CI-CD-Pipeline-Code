@@ -1,0 +1,9 @@
+version: '3'
+
+services:
+  java: #Change this service name to run another container on the same machine
+    tty: true # Enables debugging capabilities when attached to this container.
+    image: 'registry.gitlab.com/username/my-app:latest'
+    command: ["tail", "-f", "/dev/null"] # To keep the container running
+    ports:
+      - 8080:8080

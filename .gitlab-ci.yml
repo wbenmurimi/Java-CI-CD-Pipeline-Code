@@ -1,0 +1,79 @@
+variables:
+  # This will supress any download for dependencies and plugins or upload messages which would clutter the console log.
+  # `showDateTime` will show the passed time in milliseconds. You need to specify `--batch-mode` to make this work.
+  MAVEN_OPTS: "-Dhttps.protocols=TLSv1.2 -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true -Dmaven.test.skip=true"
+  # As of Maven 3.3.0 instead of this you may define these options in `.mvn/maven.config` so the same config is used
+  # when running from the command line.
+  # `installAtEnd` and `deployAtEnd` are only effective with recent version of the corresponding plugins.
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true"
+  
+  TEST_IMAGE: registry.gitlab.com/username/my-app:$CI_COMMIT_REF_NAME
+  RELEASE_IMAGE: registry.gitlab.com/username/my-app:latest
+  CI_REGISTRY: registry.gitlab.com
+
+# Cache downloaded dependencies and plugins between builds.
+# To keep cache across branches add 'key: "$CI_JOB_NAME"'
+cache:
+  paths:
+    - .m2/repository
+
+stages:
+  - build
+  - release
+  - deploy
+
+##Build Stage 
+#Pull code and create a jar file.
+#Notice the artifact path that helps this variable get carried over to the next stage
+build:
+  stage: build
+  image: maven:3.3.9-jdk-8
+  before_script:
+    
+  script:
+    - 'mvn $MAVEN_CLI_OPTS clean'
+    - 'mvn $MAVEN_CLI_OPTS package'
+  artifacts:
+    paths:
+      - ./target/my-app-0.0.1.jar    
+
+##Release Stage
+# Build a docker image and push it to docker registry
+release:
+  stage: release
+  image: docker:latest
+  only:
+    - "master"
+  services:
+  - docker:dind
+  before_script:
+    - "docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}"
+  script:
+    - "docker build --pull -t $RELEASE_IMAGE ."
+    - "docker push $RELEASE_IMAGE"
+  after_script:
+    - "docker logout ${CI_REGISTRY}"
+
+##Deployment Stage
+#I used an ubuntu base image because I had problems installing an SSH agent
+#to login to the deployment server and run the application  
+deploy:
+  stage: deploy
+  image: ubuntu:16.04
+  only:
+    - "master" #Only take code from the master branch
+  environment: production
+  services:
+    - docker:dind
+  before_script: #SSH login and verification
+    - mkdir -p ~/.ssh
+    - echo "$DEPLOY_SERVER_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client -y )'
+    - eval "$(ssh-agent -s)"
+    - ssh-add ~/.ssh/id_rsa
+    - ssh-keyscan -H ${DEPLOYMENT_SERVER_IP} >> ~/.ssh/known_hosts
+  #Stop the running the application and re run again with docker compose
+  script: 
+    - scp -r ./docker-compose.yml root@${DEPLOYMENT_SERVER_IP}:~/
+    - ssh root@$DEPLOYMENT_SERVER_IP "docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}; docker-compose -f docker-compose.yml stop; docker-compose -f docker-compose.yml rm web --force; docker pull ${RELEASE_IMAGE}; docker-compose -f docker-compose.yml up -d"
